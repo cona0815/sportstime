@@ -1,0 +1,5 @@
+{
+  "name": "運動會時間記錄器",
+  "description": "幫助記錄學校運動會預定賽程與實際發生時間的對照工具，方便後續整理照片。",
+  "requestFramePermissions": []
+}
