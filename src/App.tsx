@@ -1,6 +1,14 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Clock, Check, Plus, Trash2, Download, Play, RotateCcw, Camera, Loader2, Square, Calendar, ClipboardList, Edit2, Sun, Moon, X, Save, Key } from 'lucide-react';
+import { Clock, Check, Plus, Trash2, Download, Play, RotateCcw, Camera, Loader2, Square, Calendar, ClipboardList, Edit2, Sun, Moon, X, Save, Key, ChevronDown, ChevronUp } from 'lucide-react';
 import { GoogleGenAI, Type } from '@google/genai';
+
+interface SubEvent {
+  id: string;
+  name: string;
+  actualStartTime: string | null;
+  actualEndTime: string | null;
+  skipped?: boolean;
+}
 
 interface ScheduleEvent {
   id: string;
@@ -8,11 +16,42 @@ interface ScheduleEvent {
   expectedTime: string;
   actualStartTime: string | null;
   actualEndTime: string | null;
+  subEvents?: SubEvent[];
+  currentSubEventIndex?: number;
 }
 
 const DEFAULT_TEMPLATE: ScheduleEvent[] = [
-  { id: 't1', name: '一年級孔爺爺藏寶箱舞蹈表演、大橋幼兒園律動表演、二年級健康操表演、三年級大會舞表演', expectedTime: '08:00', actualStartTime: null, actualEndTime: null },
-  { id: 't2', name: '運動員進場、家長會及志工團進場、會旗進場、介紹來賓、表揚資深服務人員、運動員宣誓、全員退場', expectedTime: '08:30', actualStartTime: null, actualEndTime: null },
+  { 
+    id: 't1', 
+    name: '聯合開幕表演 (一、二、三年級及幼兒園)', 
+    expectedTime: '08:00', 
+    actualStartTime: null, 
+    actualEndTime: null,
+    currentSubEventIndex: 0,
+    subEvents: [
+      { id: 't1-1', name: '一年級孔爺爺藏寶箱舞蹈表演', actualStartTime: null, actualEndTime: null },
+      { id: 't1-2', name: '大橋幼兒園律動表演', actualStartTime: null, actualEndTime: null },
+      { id: 't1-3', name: '二年級健康操表演', actualStartTime: null, actualEndTime: null },
+      { id: 't1-4', name: '三年級大會舞表演', actualStartTime: null, actualEndTime: null }
+    ]
+  },
+  { 
+    id: 't2', 
+    name: '開幕典禮', 
+    expectedTime: '08:30', 
+    actualStartTime: null, 
+    actualEndTime: null,
+    currentSubEventIndex: 0,
+    subEvents: [
+      { id: 't2-1', name: '運動員進場', actualStartTime: null, actualEndTime: null },
+      { id: 't2-2', name: '家長會及志工團進場', actualStartTime: null, actualEndTime: null },
+      { id: 't2-3', name: '會旗進場', actualStartTime: null, actualEndTime: null },
+      { id: 't2-4', name: '介紹來賓', actualStartTime: null, actualEndTime: null },
+      { id: 't2-5', name: '表揚資深服務人員', actualStartTime: null, actualEndTime: null },
+      { id: 't2-6', name: '運動員宣誓', actualStartTime: null, actualEndTime: null },
+      { id: 't2-7', name: '全員退場', actualStartTime: null, actualEndTime: null }
+    ]
+  },
   { id: 't3', name: '陸上行舟—繩采飛揚 (家長會、志工團及教師)', expectedTime: '09:20', actualStartTime: null, actualEndTime: null },
   { id: 't4', name: '三、四、五、六年級 60 公尺決賽', expectedTime: '09:30', actualStartTime: null, actualEndTime: null },
   { id: 't5', name: '三、四、五、六年級 100 公尺決賽', expectedTime: '09:40', actualStartTime: null, actualEndTime: null },
@@ -41,6 +80,11 @@ export default function App() {
           ...ev,
           actualStartTime: ev.actualStartTime !== undefined ? ev.actualStartTime : (ev.actualTime || null),
           actualEndTime: ev.actualEndTime || null,
+          subEvents: ev.subEvents?.map((sub: any, idx: number) => ({
+            ...sub,
+            // Only completed sub-events can be skipped. This sanitizes old corrupted data.
+            skipped: (idx < (ev.currentSubEventIndex || 0)) ? (sub.skipped || false) : false
+          }))
         }));
       } catch (e) {
         console.error('Failed to parse schedule', e);
@@ -71,6 +115,12 @@ export default function App() {
   const [editingEventId, setEditingEventId] = useState<string | null>(null);
   const [editEventName, setEditEventName] = useState('');
   const [editEventTime, setEditEventTime] = useState('');
+
+  const [expandedEvents, setExpandedEvents] = useState<string[]>([]);
+
+  const toggleExpand = (id: string) => {
+    setExpandedEvents(prev => prev.includes(id) ? prev.filter(e => e !== id) : [...prev, id]);
+  };
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -254,23 +304,76 @@ export default function App() {
     setNewEventTime('');
   };
 
-  const handleRecordTime = (id: string, type: 'start' | 'end') => {
+  const handleRecordTime = (id: string, type: 'start' | 'end' | 'next-sub' | 'jump-sub', targetIndex?: number) => {
     const now = new Date();
     const timeString = now.toLocaleTimeString('zh-TW', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
     
-    setEvents((prev) =>
-      prev.map((ev) => {
+    setEvents((prev) => {
+      // 如果是按下「開始」，先找出目前正在進行中（有開始但沒結束）的行程，把它結束掉
+      let updatedEvents = [...prev];
+      if (type === 'start') {
+        updatedEvents = updatedEvents.map(ev => {
+          if (ev.id !== id && ev.actualStartTime && !ev.actualEndTime) {
+            return { ...ev, actualEndTime: timeString };
+          }
+          return ev;
+        });
+      }
+
+      return updatedEvents.map((ev) => {
         if (ev.id === id) {
           if (type === 'start') {
-            return { ...ev, actualStartTime: timeString };
+            if (ev.subEvents && ev.subEvents.length > 0) {
+              const newSubEvents = ev.subEvents.map((s, idx) => 
+                idx === 0 
+                  ? { ...s, actualStartTime: timeString, actualEndTime: null, skipped: false }
+                  : { ...s, actualStartTime: null, actualEndTime: null, skipped: false }
+              );
+              return { ...ev, actualStartTime: timeString, actualEndTime: null, subEvents: newSubEvents, currentSubEventIndex: 0 };
+            }
+            return { ...ev, actualStartTime: timeString, actualEndTime: null };
+          } else if (type === 'next-sub') {
+            if (ev.subEvents && ev.currentSubEventIndex !== undefined && ev.currentSubEventIndex < ev.subEvents.length - 1) {
+              const newSubEvents = [...ev.subEvents];
+              const currentIndex = ev.currentSubEventIndex;
+              newSubEvents[currentIndex] = { ...newSubEvents[currentIndex], actualEndTime: timeString };
+              newSubEvents[currentIndex + 1] = { ...newSubEvents[currentIndex + 1], actualStartTime: timeString };
+              return { ...ev, subEvents: newSubEvents, currentSubEventIndex: currentIndex + 1 };
+            }
+            return ev;
+          } else if (type === 'jump-sub' && targetIndex !== undefined) {
+            if (ev.subEvents && ev.currentSubEventIndex !== undefined && targetIndex > ev.currentSubEventIndex) {
+              const newSubEvents = [...ev.subEvents];
+              const currentIndex = ev.currentSubEventIndex;
+              
+              // 結束目前的子行程
+              newSubEvents[currentIndex] = { ...newSubEvents[currentIndex], actualEndTime: timeString };
+              
+              // 將中間跳過的子行程時間設為相同（持續時間 0 秒），並標記為 skipped，這樣匯出時會與上一個資料夾合併
+              for (let i = currentIndex + 1; i < targetIndex; i++) {
+                newSubEvents[i] = { ...newSubEvents[i], actualStartTime: timeString, actualEndTime: timeString, skipped: true };
+              }
+              
+              // 開始目標子行程
+              newSubEvents[targetIndex] = { ...newSubEvents[targetIndex], actualStartTime: timeString };
+              
+              return { ...ev, subEvents: newSubEvents, currentSubEventIndex: targetIndex };
+            }
+            return ev;
           } else {
             const fallbackStartTime = ev.actualStartTime || `${ev.expectedTime}:00`;
+            if (ev.subEvents && ev.currentSubEventIndex !== undefined) {
+              const newSubEvents = [...ev.subEvents];
+              const currentIndex = ev.currentSubEventIndex;
+              newSubEvents[currentIndex] = { ...newSubEvents[currentIndex], actualEndTime: timeString };
+              return { ...ev, actualStartTime: fallbackStartTime, actualEndTime: timeString, subEvents: newSubEvents };
+            }
             return { ...ev, actualStartTime: fallbackStartTime, actualEndTime: timeString };
           }
         }
         return ev;
-      })
-    );
+      });
+    });
 
     if (type === 'end') {
       const currentSortedEvents = [...events].sort((a, b) => a.expectedTime.localeCompare(b.expectedTime));
@@ -292,9 +395,20 @@ export default function App() {
       setEvents((prev) =>
         prev.map((ev) => {
           if (ev.id === id) {
-            return type === 'start' 
-              ? { ...ev, actualStartTime: null } 
-              : { ...ev, actualEndTime: null };
+            if (type === 'start') {
+              return { 
+                ...ev, 
+                actualStartTime: null, 
+                subEvents: ev.subEvents?.map(s => ({ ...s, actualStartTime: null, actualEndTime: null, skipped: false })),
+                currentSubEventIndex: 0
+              };
+            } else {
+              return { 
+                ...ev, 
+                actualEndTime: null,
+                subEvents: ev.subEvents?.map(s => ({ ...s, actualEndTime: null }))
+              };
+            }
           }
           return ev;
         })
@@ -304,7 +418,13 @@ export default function App() {
 
   const handleResetAllTimes = () => {
     showConfirm('重設所有時間', '確定要清除「所有」行程的記錄時間嗎？這不會刪除行程本身。', () => {
-      setEvents((prev) => prev.map((ev) => ({ ...ev, actualStartTime: null, actualEndTime: null })));
+      setEvents((prev) => prev.map((ev) => ({ 
+        ...ev, 
+        actualStartTime: null, 
+        actualEndTime: null,
+        subEvents: ev.subEvents?.map(s => ({ ...s, actualStartTime: null, actualEndTime: null, skipped: false })),
+        currentSubEventIndex: 0
+      })));
     });
   };
 
@@ -339,37 +459,82 @@ export default function App() {
       version: 1,
       exportDate: new Date().toISOString(),
       description: "照片篩選器 - 時段設定檔",
-      groups: sortedEvents.map(ev => {
-        // Use actual times if available, otherwise fallback to expected time
-        // Note: If actualEndTime is missing but actualStartTime exists, we just use expectedTime for end
-        // as a fallback, or we could leave it null depending on requirements. 
-        // Based on the example, it seems it expects valid ISO strings for both.
-        
+      groups: sortedEvents.flatMap(ev => {
+        if (ev.subEvents && ev.subEvents.length > 0) {
+          const result = [];
+          for (let i = 0; i < ev.subEvents.length; i++) {
+            const sub = ev.subEvents[i];
+            
+            if (i < ev.currentSubEventIndex!) {
+              let start = formatToISO(sub.actualStartTime, ev.expectedTime);
+              let end = formatToISO(sub.actualEndTime, ev.expectedTime);
+              
+              if (!start) start = formatToISO(ev.expectedTime, ev.expectedTime);
+              if (!end) {
+                const startDate = new Date(start!);
+                startDate.setMinutes(startDate.getMinutes() + 30);
+                const endHours = String(startDate.getHours()).padStart(2, '0');
+                const endMinutes = String(startDate.getMinutes()).padStart(2, '0');
+                end = `${eventDate}T${endHours}:${endMinutes}:00`;
+              }
+              
+              if (sub.skipped && result.length > 0) {
+                result[result.length - 1].name += `_${sub.name}`;
+                result[result.length - 1].end = end;
+              } else {
+                result.push({
+                  name: `${String(i + 1).padStart(2, '0')}_${sub.name}`,
+                  start: start,
+                  end: end
+                });
+              }
+            } else if (i === ev.currentSubEventIndex!) {
+              const remainingSubs = ev.subEvents.slice(i);
+              const combinedName = remainingSubs.map(s => s.name).join('_');
+              
+              let start = formatToISO(sub.actualStartTime, ev.expectedTime);
+              let end = formatToISO(ev.actualEndTime || sub.actualEndTime, ev.expectedTime);
+              
+              if (!start) start = formatToISO(ev.expectedTime, ev.expectedTime);
+              if (!end) {
+                const startDate = new Date(start!);
+                startDate.setMinutes(startDate.getMinutes() + 30);
+                const endHours = String(startDate.getHours()).padStart(2, '0');
+                const endMinutes = String(startDate.getMinutes()).padStart(2, '0');
+                end = `${eventDate}T${endHours}:${endMinutes}:00`;
+              }
+              
+              result.push({
+                name: `${String(i + 1).padStart(2, '0')}_${combinedName}`,
+                start: start,
+                end: end
+              });
+              break;
+            }
+          }
+          return result;
+        }
+
         let start = formatToISO(ev.actualStartTime, ev.expectedTime);
         let end = formatToISO(ev.actualEndTime, ev.expectedTime);
 
-        // Fallbacks if actual times are not recorded
         if (!start) {
           start = formatToISO(ev.expectedTime, ev.expectedTime);
         }
         if (!end) {
-          // If no end time, we add 30 minutes to start time as a rough guess, 
-          // or just use the next event's start time if we wanted to be complex.
-          // For simplicity, we'll just use the start time + 30 mins if no actual end time is recorded.
           const startDate = new Date(start!);
           startDate.setMinutes(startDate.getMinutes() + 30);
           
-          // Format back to local time string to avoid timezone issues
           const endHours = String(startDate.getHours()).padStart(2, '0');
           const endMinutes = String(startDate.getMinutes()).padStart(2, '0');
           end = `${eventDate}T${endHours}:${endMinutes}:00`;
         }
 
-        return {
+        return [{
           name: ev.name,
           start: start,
           end: end
-        };
+        }];
       })
     };
 
@@ -689,6 +854,118 @@ export default function App() {
                     </button>
                   )}
                 </div>
+
+                {/* Sub Events UI */}
+                {ev.subEvents && ev.actualStartTime && !ev.actualEndTime && ev.currentSubEventIndex !== undefined && (
+                  <div className="mt-2 bg-indigo-50 border border-indigo-200 rounded-lg p-3 shadow-inner">
+                    <div className="text-sm text-indigo-800 font-bold mb-3 flex items-center gap-2">
+                      <span className="bg-indigo-200 text-indigo-900 px-2 py-0.5 rounded text-xs">
+                        {ev.currentSubEventIndex + 1} / {ev.subEvents.length}
+                      </span>
+                      目前演出：{ev.subEvents[ev.currentSubEventIndex].name}
+                    </div>
+                    {ev.currentSubEventIndex < ev.subEvents.length - 1 ? (
+                      <div className="space-y-2">
+                        <button
+                          onClick={() => handleRecordTime(ev.id, 'next-sub')}
+                          className="w-full flex items-center justify-center gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-3 rounded-lg text-base font-bold transition-colors shadow-md"
+                        >
+                          <Play className="w-5 h-5" />
+                          ⏭️ 進入下一表演：{ev.subEvents[ev.currentSubEventIndex + 1].name}
+                        </button>
+                        <p className="text-xs text-indigo-600/70 text-center font-medium">
+                          💡 若行程太趕，可直接按上方「結束」，剩餘未按的表演將自動合併為同一個資料夾。
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="text-sm text-indigo-600 text-center font-medium py-2 bg-indigo-100/50 rounded-lg">
+                        這是最後一個表演，請點擊上方的「結束」按鈕完成此時段。
+                      </div>
+                    )}
+                    
+                    {/* Sub Events List */}
+                    <div className="mt-4 space-y-1.5">
+                      {ev.subEvents.map((sub, idx) => {
+                        const isCompleted = idx < ev.currentSubEventIndex!;
+                        const isCurrentSub = idx === ev.currentSubEventIndex;
+                        const isUpcoming = idx > ev.currentSubEventIndex!;
+                        return (
+                          <div key={sub.id} className={`flex items-center justify-between gap-2 text-xs sm:text-sm px-2 py-1.5 rounded ${isCurrentSub ? 'bg-indigo-100 text-indigo-900 font-bold' : isCompleted ? 'text-slate-400' : 'text-slate-600'}`}>
+                            <div className="flex items-center gap-2">
+                              {isCompleted ? (
+                                sub.skipped ? (
+                                  <div className="w-3 h-3 sm:w-4 sm:h-4 rounded-full border border-slate-300 flex items-center justify-center shrink-0" title="已合併">
+                                    <div className="w-1.5 h-1.5 bg-slate-300 rounded-full" />
+                                  </div>
+                                ) : (
+                                  <Check className="w-3 h-3 sm:w-4 sm:h-4 text-emerald-500 shrink-0" />
+                                )
+                              ) : isCurrentSub ? (
+                                <Play className="w-3 h-3 sm:w-4 sm:h-4 text-indigo-600 shrink-0" />
+                              ) : (
+                                <div className="w-3 h-3 sm:w-4 sm:h-4 shrink-0" />
+                              )}
+                              <span className={isCompleted ? 'line-through' : ''}>
+                                {sub.name}
+                              </span>
+                              {isCompleted && sub.skipped && (
+                                <span className="text-[10px] text-slate-400 ml-1 border border-slate-200 px-1 rounded bg-slate-100">
+                                  已合併 {sub.actualStartTime}
+                                </span>
+                              )}
+                            </div>
+                            {isUpcoming && (
+                              <button
+                                onClick={() => handleRecordTime(ev.id, 'jump-sub', idx)}
+                                className="text-[10px] sm:text-xs bg-white border border-slate-300 hover:bg-indigo-500 hover:text-white hover:border-indigo-500 text-slate-600 px-2 py-1 rounded transition-colors shadow-sm whitespace-nowrap"
+                              >
+                                直接跳到此項
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Completed Sub Events UI */}
+                {ev.subEvents && ev.actualEndTime && (
+                  <div className="mt-2">
+                    <button
+                      onClick={() => toggleExpand(ev.id)}
+                      className="text-sm text-slate-500 hover:text-slate-700 flex items-center gap-1 py-1"
+                    >
+                      {expandedEvents.includes(ev.id) ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                      {expandedEvents.includes(ev.id) ? '隱藏子行程' : '檢視子行程'}
+                    </button>
+                    {expandedEvents.includes(ev.id) && (
+                      <div className="mt-2 bg-slate-50 border border-slate-200 rounded-lg p-3 shadow-inner space-y-1.5">
+                        {ev.subEvents.map((sub, idx) => (
+                          <div key={sub.id} className="flex items-center justify-between gap-2 text-xs sm:text-sm px-2 py-1.5 rounded text-slate-500">
+                            <div className="flex items-center gap-2">
+                              {sub.skipped ? (
+                                <div className="w-3 h-3 sm:w-4 sm:h-4 rounded-full border border-slate-300 flex items-center justify-center shrink-0" title="已合併">
+                                  <div className="w-1.5 h-1.5 bg-slate-300 rounded-full" />
+                                </div>
+                              ) : (
+                                <Check className="w-3 h-3 sm:w-4 sm:h-4 text-emerald-500 shrink-0" />
+                              )}
+                              <span className="line-through">
+                                {sub.name}
+                              </span>
+                              {sub.skipped && (
+                                <span className="text-[10px] text-slate-400 ml-1 border border-slate-200 px-1 rounded bg-slate-100">
+                                  已合併 {sub.actualStartTime}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )})
           )}
